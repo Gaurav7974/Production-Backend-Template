@@ -1,0 +1,298 @@
+# Backend Template - AI Coding Rules
+
+You are an expert FastAPI backend developer working with a highly structured, production-ready template. This codebase follows strict architectural patterns to ensure consistency, maintainability, and scalability.
+
+## Core Principles
+
+1. Separation of Concerns: Routes stay thin, services contain business logic
+2. Type Safety: Use Pydantic for all data validation
+3. Dependency Injection: Use FastAPI's Depends() pattern everywhere
+4. Consistent Structure: Follow the established folder hierarchy religiously
+5. Example-Driven: Look at examples/ directories before creating new code
+
+## Project Structure
+
+```
+app/
+├── api/v1/routes/        # HTTP endpoints (thin layer)
+├── services/             # Business logic (thick layer)
+├── schemas/              # Pydantic models for validation
+├── db/models/            # SQLAlchemy database models
+├── core/                 # Config, security, exceptions
+└── dependencies.py       # Dependency injection setup
+```
+
+## Coding Rules
+
+### When Creating New Features
+
+ALWAYS follow this order:
+
+1. Schema First: Create Pydantic schemas in app/schemas/
+2. Model Second: Create SQLAlchemy model in app/db/models/
+3. Service Third: Create service class in app/services/
+4. Route Last: Create route handlers in app/api/v1/routes/
+
+### File Naming Convention
+
+- Routes: {feature}_routes.py or {feature}.py
+- Services: {feature}_service.py
+- Schemas: {feature}_schema.py or {feature}.py
+- Models: {feature}_model.py or {feature}.py
+
+### Import Order (Use isort/ruff)
+
+```python
+# 1. Standard library
+from typing import List, Optional
+from datetime import datetime
+
+# 2. Third-party
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+# 3. Local - absolute imports only
+from app.core.config import settings
+from app.core.exceptions import NotFoundException
+from app.db.session import get_db
+from app.schemas.user import UserCreate, UserResponse
+from app.services.user_service import UserService
+```
+
+## Code Patterns
+
+### Routes (Thin Layer)
+
+```python
+# app/api/v1/routes/users.py
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from app.db.session import get_db
+from app.schemas.user import UserCreate, UserResponse
+from app.services.user_service import UserService
+
+router = APIRouter(prefix="/users", tags=["users"])
+
+@router.post("", response_model=UserResponse, status_code=201)
+async def create_user(
+    user_data: UserCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new user.
+    
+    Routes should:
+    - Accept validated input (Pydantic schema)
+    - Call service layer
+    - Return Pydantic response
+    - NOT contain business logic
+    """
+    service = UserService(db)
+    return await service.create_user(user_data)
+```
+
+### Services (Thick Layer)
+
+```python
+# app/services/user_service.py
+from sqlalchemy.orm import Session
+from typing import List, Optional
+
+from app.core.exceptions import NotFoundException, ValidationException
+from app.db.models.user import User
+from app.schemas.user import UserCreate, UserUpdate, UserResponse
+
+class UserService:
+    """
+    Services should:
+    - Contain ALL business logic
+    - Raise custom exceptions (not HTTPException)
+    - Return Pydantic schemas (not DB models)
+    - Use type hints everywhere
+    """
+    
+    def __init__(self, db: Session):
+        self.db = db
+    
+    async def create_user(self, user_data: UserCreate) -> UserResponse:
+        # Business validation
+        existing = self.db.query(User).filter(
+            User.email == user_data.email
+        ).first()
+        
+        if existing:
+            raise ValidationException("Email already registered")
+        
+        # Create and persist
+        db_user = User(**user_data.model_dump())
+        self.db.add(db_user)
+        self.db.commit()
+        self.db.refresh(db_user)
+        
+        return UserResponse.model_validate(db_user)
+```
+
+### Schemas (Pydantic Models)
+
+```python
+# app/schemas/user.py
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional
+from datetime import datetime
+
+class UserBase(BaseModel):
+    """Base schema with common fields"""
+    email: EmailStr
+    username: str = Field(min_length=3, max_length=50)
+
+class UserCreate(UserBase):
+    """Schema for creating a user"""
+    password: str = Field(min_length=8)
+
+class UserUpdate(BaseModel):
+    """Schema for updating a user (all fields optional)"""
+    email: Optional[EmailStr] = None
+    username: Optional[str] = Field(None, min_length=3, max_length=50)
+
+class UserResponse(UserBase):
+    """Schema for API responses"""
+    id: int
+    created_at: datetime
+    
+    model_config = {"from_attributes": True}
+```
+
+### Models (SQLAlchemy)
+
+```python
+# app/db/models/user.py
+from sqlalchemy import Column, Integer, String, DateTime
+from datetime import datetime
+
+from app.db.base import Base
+
+class User(Base):
+    """
+    Database models should:
+    - Inherit from Base
+    - Define __tablename__
+    - Use proper column types
+    - Include indexes for foreign keys and frequently queried fields
+    """
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+```
+
+## Exception Handling
+
+NEVER use HTTPException in services. Use custom exceptions:
+
+```python
+from app.core.exceptions import (
+    NotFoundException,      # 404
+    ValidationException,    # 400
+    UnauthorizedException, # 401
+    ForbiddenException,    # 403
+    ConflictException,     # 409
+)
+
+# In services:
+if not user:
+    raise NotFoundException(f"User {user_id} not found")
+
+if existing_email:
+    raise ValidationException("Email already exists")
+```
+
+## Security Rules
+
+- NEVER return raw database models from routes
+- ALWAYS use Pydantic schemas for responses
+- NEVER store plain text passwords
+- ALWAYS use dependency injection for database sessions
+- NEVER commit sensitive data (check .gitignore)
+
+## Testing Pattern
+
+```python
+# tests/api/v1/test_users.py
+from fastapi.testclient import TestClient
+
+def test_create_user(client: TestClient):
+    """
+    Tests should:
+    - Be isolated (use fixtures)
+    - Test one thing
+    - Use descriptive names
+    """
+    response = client.post(
+        "/api/v1/users",
+        json={
+            "email": "test@example.com",
+            "username": "testuser",
+            "password": "securepass123"
+        }
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["email"] == "test@example.com"
+    assert "password" not in data  # Never expose passwords
+```
+
+## Anti-Patterns (DO NOT DO)
+
+- Business logic in routes
+- Direct database queries in routes
+- Returning DB models from endpoints
+- Using HTTPException in services
+- Skipping Pydantic validation
+- Creating sessions manually (use Depends(get_db))
+- Mixing sync and async incorrectly
+- Hardcoding configuration values
+
+## Best Practices (ALWAYS DO)
+
+- Look at examples/ directories first
+- Use type hints everywhere
+- Write docstrings for public functions
+- Use async/await consistently
+- Validate input with Pydantic
+- Raise specific exceptions
+- Return Pydantic schemas
+- Use dependency injection
+
+## Before Making Changes
+
+1. Check examples/ directories for similar patterns
+2. Read relevant .cursor/rules/*.mdc files
+3. Follow the established structure exactly
+4. Test your changes work correctly
+5. Update documentation if adding new patterns
+
+## When Stuck
+
+1. Look at app/api/v1/routes/examples/ for route patterns
+2. Look at app/services/examples/ for service patterns
+3. Look at app/schemas/examples/ for schema patterns
+4. Look at app/db/models/examples/ for model patterns
+5. Check .cursor/rules/ for specific guidance
+
+## Success Criteria
+
+Your code is correct if:
+- Routes are thin (just call services)
+- Services contain business logic
+- All data uses Pydantic schemas
+- Database models are separate from schemas
+- Exceptions are handled properly
+- Type hints are present
+- Tests pass
+- Follows existing patterns exactly
+
+Remember: Consistency over cleverness. Follow the patterns, don't invent new ones.
